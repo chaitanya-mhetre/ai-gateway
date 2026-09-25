@@ -7,19 +7,20 @@ reach it. A production system would use SSO/JWT with roles; see README "Limitati
 from __future__ import annotations
 
 import hmac
-from datetime import datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 
 from ai_gateway.auth import KeyAuthenticator, generate_key, hash_key
 from ai_gateway.config import Settings
-from ai_gateway.db import ApiKey, Database, Project, Tenant, utcnow
+from ai_gateway.db import ApiKey, Database, Project, Tenant, UsageEvent, utcnow
 from ai_gateway.gateway import Gateway
+from ai_gateway.metering.pricing import PriceTable
 
 
 def require_admin(request: Request, authorization: str | None = Header(default=None)) -> None:
@@ -150,3 +151,75 @@ async def providers_health(request: Request) -> dict[str, Any]:
             },
         }
     return out
+
+
+@router.get("/usage")
+async def usage(
+    request: Request,
+    project_id: str,
+    from_date: Annotated[date | None, Query(alias="from")] = None,
+    to_date: Annotated[date | None, Query(alias="to")] = None,
+    group_by: Literal["model", "day", "key"] = "model",
+) -> list[dict[str, Any]]:
+    """Aggregated usage from the raw events (the daily rollup table serves dashboards)."""
+    group_cols: dict[str, Any] = {
+        "model": (UsageEvent.provider, UsageEvent.model),
+        "day": (func.date(UsageEvent.created_at),),
+        "key": (UsageEvent.api_key_id,),
+    }
+    cols = group_cols[group_by]
+    stmt = (
+        select(
+            *cols,
+            func.count().label("requests"),
+            func.sum(UsageEvent.prompt_tokens).label("prompt_tokens"),
+            func.sum(UsageEvent.completion_tokens).label("completion_tokens"),
+            func.sum(UsageEvent.est_cost_usd).label("est_cost_usd"),
+            func.sum(case((UsageEvent.status_code >= 400, 1), else_=0)).label("errors"),
+            func.sum(case((UsageEvent.fallback_used, 1), else_=0)).label("fallbacks"),
+        )
+        .where(UsageEvent.project_id == project_id)
+        .group_by(*cols)
+    )
+    if from_date:
+        stmt = stmt.where(UsageEvent.created_at >= datetime.combine(from_date, time.min, UTC))
+    if to_date:
+        stmt = stmt.where(UsageEvent.created_at < datetime.combine(to_date, time.max, UTC))
+    async with _db(request).session() as s:
+        rows = (await s.execute(stmt)).all()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        m = dict(row._mapping)
+        group = {
+            k: (str(v) if isinstance(v, date) else v) for k, v in m.items() if k not in _AGG_FIELDS
+        }
+        if group_by == "day":
+            group = {"day": str(next(iter(group.values())))}
+        out.append(
+            {
+                **group,
+                "requests": int(m["requests"]),
+                "prompt_tokens": int(m["prompt_tokens"] or 0),
+                "completion_tokens": int(m["completion_tokens"] or 0),
+                "est_cost_usd": str(Decimal(m["est_cost_usd"] or 0).quantize(Decimal("0.000001"))),
+                "errors": int(m["errors"] or 0),
+                "fallbacks": int(m["fallbacks"] or 0),
+            }
+        )
+    return out
+
+
+_AGG_FIELDS = {
+    "requests",
+    "prompt_tokens",
+    "completion_tokens",
+    "est_cost_usd",
+    "errors",
+    "fallbacks",
+}
+
+
+@router.get("/prices")
+async def prices(request: Request) -> list[dict[str, Any]]:
+    table: PriceTable = request.app.state.prices
+    return [e.model_dump(mode="json") for e in table.entries]

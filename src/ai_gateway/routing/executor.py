@@ -22,6 +22,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
+from opentelemetry.trace import Status, StatusCode
+
 from ai_gateway import errors as err
 from ai_gateway.config import AliasConfig, TargetConfig
 from ai_gateway.errors import AllTargetsFailedError, ProviderError
@@ -32,6 +34,7 @@ from ai_gateway.models import (
     EmbeddingResponse,
     StreamChunk,
 )
+from ai_gateway.observability.tracing import tracer
 from ai_gateway.providers.base import Provider
 from ai_gateway.routing.backoff import backoff_delay
 from ai_gateway.routing.breaker import CircuitBreaker
@@ -76,6 +79,8 @@ class ExecInfo:
     attempts: int = 0
     fallback_used: bool = False
     ttft_s: float | None = None
+    provider_time_s: float = 0.0  # time spent waiting on providers (for the overhead metric)
+    backoff_time_s: float = 0.0
     errors: list[ProviderError] = field(default_factory=list)
 
 
@@ -153,9 +158,23 @@ class Executor:
                 info.attempts += 1
                 started = self.clock()
                 try:
-                    result = await call(provider, target, remaining)
+                    with tracer.start_as_current_span(
+                        "gateway.attempt",
+                        attributes={
+                            "gateway.provider": target.provider,
+                            "gateway.model": target.model,
+                            "gateway.attempt": info.attempts,
+                        },
+                    ) as span:
+                        try:
+                            result = await call(provider, target, remaining)
+                        except ProviderError as exc:
+                            span.set_attribute("gateway.error_reason", exc.reason)
+                            span.set_status(Status(StatusCode.ERROR, exc.reason))
+                            raise
                 except ProviderError as exc:
                     elapsed = self.clock() - started
+                    info.provider_time_s += elapsed
                     error = exc
                     info.errors.append(exc)
                     self.listener.on_attempt(
@@ -178,8 +197,10 @@ class Executor:
                         break  # waiting would blow the deadline; try the next target instead
                     self.listener.on_retry(target.provider, exc.reason)
                     await self.sleep(delay)
+                    info.backoff_time_s += delay
                     continue
                 elapsed = self.clock() - started
+                info.provider_time_s += elapsed
                 self.listener.on_attempt(target.provider, target.model, True, None, elapsed)
                 self.latency.observe(target.key, elapsed)
                 await self.breaker.record_success(target.provider)

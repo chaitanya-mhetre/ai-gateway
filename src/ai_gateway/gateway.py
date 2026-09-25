@@ -46,7 +46,9 @@ class CallMeta:
     fallback_used: bool = False
     cache: str = "miss"
     ttft_ms: float | None = None
+    provider_time_s: float = 0.0
     errors: list[str] = field(default_factory=list)
+    error_providers: list[str] = field(default_factory=list)
 
     @classmethod
     def from_exec(cls, info: ExecInfo) -> CallMeta:
@@ -57,7 +59,9 @@ class CallMeta:
             attempts=info.attempts,
             fallback_used=info.fallback_used,
             ttft_ms=info.ttft_s * 1000 if info.ttft_s is not None else None,
+            provider_time_s=info.provider_time_s,
             errors=[e.reason for e in info.errors],
+            error_providers=[e.provider for e in info.errors],
         )
 
 
@@ -77,6 +81,7 @@ class Gateway:
         self.latency = LatencyTracker()
         self.breaker: CircuitBreaker = breaker or InMemoryBreaker(config.breaker)
         self.price_of = price_of
+        self.listener = listener
         self.rng = rng or random.Random()
         self.executor = Executor(
             providers, self.breaker, self.latency, listener=listener, rng=self.rng

@@ -8,7 +8,8 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
 from ai_gateway import admin
@@ -26,6 +27,10 @@ from ai_gateway.limits import (
     RedisBudgetStore,
     RedisLimiter,
 )
+from ai_gateway.metering.pricing import PriceTable
+from ai_gateway.metering.usage import InProcessSink, RedisStreamSink, UsageSink
+from ai_gateway.observability.metrics import Metrics
+from ai_gateway.observability.tracing import setup_tracing
 from ai_gateway.openai_compat import (
     ChunkEncoder,
     OpenAIChatRequest,
@@ -92,17 +97,30 @@ def create_app(
     limiter: Limiter = RedisLimiter(redis) if redis else InMemoryLimiter()
     budgets: BudgetStore = RedisBudgetStore(redis) if redis else InMemoryBudgetStore()
 
+    if settings.otel_enabled:
+        setup_tracing()
+    metrics = Metrics()
+    prices = PriceTable.load(config.price_table_path)
     gateway = Gateway(
-        config, providers if providers is not None else build_providers(config), breaker=breaker
+        config,
+        providers if providers is not None else build_providers(config),
+        breaker=breaker,
+        listener=metrics,
+        price_of=prices.blended_price,
     )
     db = Database(settings.database_url)
+    sink: UsageSink = RedisStreamSink(redis) if redis else InProcessSink(db)
     authenticator = KeyAuthenticator(db, settings.key_pepper, cache_ttl_s=settings.key_cache_ttl_s)
-    service = GatewayService(gateway, Guard(limiter, budgets))
+    service = GatewayService(
+        gateway, Guard(limiter, budgets), prices=prices, sink=sink, metrics=metrics
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await db.create_all()
+        await sink.start()
         yield
+        await sink.stop()
         await gateway.aclose()
         await db.dispose()
         if redis is not None:
@@ -114,6 +132,9 @@ def create_app(
     app.state.db = db
     app.state.authenticator = authenticator
     app.state.service = service
+    app.state.metrics = metrics
+    app.state.prices = prices
+    app.state.sink = sink
     app.include_router(admin.router)
 
     async def principal_for(request: Request) -> Principal:
@@ -150,7 +171,7 @@ def create_app(
         opts = parse_options(request)
         req = to_internal(body, max_tokens_cap=settings.max_tokens_cap)
         if req.stream:
-            chunks, meta = await service.stream(principal, req, opts)
+            chunks, meta = await service.stream(principal, req, opts, request_id)
             encoder = ChunkEncoder(request_id, meta.model or req.model)
 
             async def sse() -> AsyncIterator[str]:
@@ -166,7 +187,7 @@ def create_app(
             return StreamingResponse(
                 sse(), media_type="text/event-stream", headers=_meta_headers(meta, request_id)
             )
-        resp, meta = await service.chat(principal, req, opts)
+        resp, meta = await service.chat(principal, req, opts, request_id)
         return JSONResponse(
             response_to_openai(resp, request_id), headers=_meta_headers(meta, request_id)
         )
@@ -176,7 +197,7 @@ def create_app(
         request_id = new_request_id()
         principal = await principal_for(request)
         resp, meta = await service.embed(
-            principal, embedding_to_internal(body), parse_options(request)
+            principal, embedding_to_internal(body), parse_options(request), request_id
         )
         return JSONResponse(embeddings_to_openai(resp), headers=_meta_headers(meta, request_id))
 
@@ -192,6 +213,10 @@ def create_app(
             "object": "list",
             "data": [{"id": a, "object": "model", "owned_by": "gateway"} for a in visible],
         }
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
