@@ -21,7 +21,7 @@ from ai_gateway.models import ChatRequest, ChatResponse, Message, ToolSpec
 from ai_gateway.providers.base import Provider
 from ai_gateway.providers.mock import MockProvider, fake_embedding
 from ai_gateway.redis_client import make_redis
-from tests.conftest import app_client, make_config
+from tests.conftest import ADMIN, app_client, make_config
 
 
 def req(content: str = "What is 2+2?", **kw: Any) -> ChatRequest:
@@ -120,8 +120,6 @@ async def test_redis_store_round_trip(redis: Redis) -> None:
 
 # --- through the HTTP API -----------------------------------------------------------------------
 
-ADMIN = {"Authorization": "Bearer admin-secret"}
-
 
 @pytest.fixture
 def mocks() -> dict[str, MockProvider]:
@@ -139,7 +137,6 @@ async def gw(mocks: dict[str, MockProvider]) -> AsyncIterator[httpx.AsyncClient]
     config.cache.semantic_threshold = 0.9
     settings = Settings(
         auth_enabled=True,
-        admin_token="admin-secret",
         key_pepper="pep",
         redis_url=None,
         database_url="sqlite+aiosqlite:///:memory:",

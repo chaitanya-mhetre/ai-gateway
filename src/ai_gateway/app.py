@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -13,6 +15,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
 from ai_gateway import admin
+from ai_gateway.admin_users import AdminAuthenticator
 from ai_gateway.auth import ANONYMOUS, KeyAuthenticator, Principal
 from ai_gateway.cache.exact import CacheStore, InMemoryCacheStore, RedisCacheStore
 from ai_gateway.cache.layer import ResponseCache
@@ -118,6 +121,12 @@ def create_app(
     db = Database(settings.database_url)
     sink: UsageSink = RedisStreamSink(redis) if redis else InProcessSink(db)
     authenticator = KeyAuthenticator(db, settings.key_pepper, cache_ttl_s=settings.key_cache_ttl_s)
+    admin_authenticator = AdminAuthenticator(db, settings.key_pepper)
+    if os.environ.get("GATEWAY_ADMIN_TOKEN"):
+        logging.getLogger(__name__).warning(
+            "GATEWAY_ADMIN_TOKEN is no longer used: admins have personal tokens with roles. "
+            "Create the first one with `ai-gateway create-admin --email you@example.com --role owner`."
+        )
     cache_store: CacheStore = RedisCacheStore(redis) if redis else InMemoryCacheStore()
 
     async def embed_for_cache(text: str) -> list[float]:
@@ -152,6 +161,7 @@ def create_app(
     app.state.gateway = gateway
     app.state.db = db
     app.state.authenticator = authenticator
+    app.state.admin_authenticator = admin_authenticator
     app.state.service = service
     app.state.metrics = metrics
     app.state.prices = prices

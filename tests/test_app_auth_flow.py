@@ -11,9 +11,8 @@ import pytest
 from ai_gateway.app import create_app
 from ai_gateway.config import Settings
 from ai_gateway.providers.base import Provider
-from tests.conftest import app_client, make_config
+from tests.conftest import ADMIN, app_client, make_config
 
-ADMIN = {"Authorization": "Bearer admin-secret"}
 CHAT = {"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]}
 
 
@@ -21,7 +20,6 @@ CHAT = {"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]
 async def gw(providers: dict[str, Provider]) -> AsyncIterator[httpx.AsyncClient]:
     settings = Settings(
         auth_enabled=True,
-        admin_token="admin-secret",
         key_pepper="pep",
         redis_url=None,
         database_url="sqlite+aiosqlite:///:memory:",

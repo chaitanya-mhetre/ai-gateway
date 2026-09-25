@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from ai_gateway.admin_users import Role, create_admin_user
 from ai_gateway.app import create_app
 from ai_gateway.config import GatewayConfig, Settings
 from ai_gateway.providers.base import Provider
@@ -52,10 +53,33 @@ def providers() -> dict[str, Provider]:
     }
 
 
+# Admin tokens seeded by `app_client` (one per role). Tests send these instead of a shared secret.
+OWNER_TOKEN = "ga_testowner001_owner-secret"
+OPERATOR_TOKEN = "ga_testoperatr1_operator-secret"
+VIEWER_TOKEN = "ga_testviewer01_viewer-secret"
+ADMIN = {"Authorization": f"Bearer {OWNER_TOKEN}"}
+OPERATOR = {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
+VIEWER = {"Authorization": f"Bearer {VIEWER_TOKEN}"}
+
+
+async def seed_admins(app: FastAPI) -> None:
+    settings: Settings = app.state.settings
+    for email, role, token in [
+        ("owner@example.com", Role.OWNER, OWNER_TOKEN),
+        ("operator@example.com", Role.OPERATOR, OPERATOR_TOKEN),
+        ("viewer@example.com", Role.VIEWER, VIEWER_TOKEN),
+    ]:
+        await create_admin_user(
+            app.state.db, settings.key_pepper, email=email, role=role, token=token
+        )
+
+
 @asynccontextmanager
 async def app_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """An in-process client that also runs the app's lifespan (DB tables, shutdown hooks)."""
+    """An in-process client that runs the app's lifespan (migrations, shutdown hooks) and seeds
+    one admin per role."""
     async with app.router.lifespan_context(app):
+        await seed_admins(app)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://gw") as c:
             yield c

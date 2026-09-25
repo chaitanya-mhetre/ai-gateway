@@ -16,9 +16,8 @@ from ai_gateway.config import Settings
 from ai_gateway.metering.usage import InProcessSink
 from ai_gateway.providers.base import Provider
 from ai_gateway.providers.mock import MockProvider, http_5xx
-from tests.conftest import app_client, make_config
+from tests.conftest import ADMIN, app_client, make_config
 
-ADMIN = {"Authorization": "Bearer admin-secret"}
 CHAT = {"model": "chat-default", "messages": [{"role": "user", "content": "hello there"}]}
 
 PRICES = """
@@ -40,7 +39,6 @@ async def gw(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
     }
     settings = Settings(
         auth_enabled=True,
-        admin_token="admin-secret",
         key_pepper="pep",
         redis_url=None,
         database_url="sqlite+aiosqlite:///:memory:",

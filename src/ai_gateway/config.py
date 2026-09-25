@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     config_path: Path = Path("config/gateway.yaml")
     redis_url: str | None = None  # None → in-memory state (single replica only)
     database_url: str = "sqlite+aiosqlite:///./gateway.db"
-    admin_token: str = "change-me-admin-token"
     key_pepper: str = "change-me-pepper"
     auth_enabled: bool = True
     otel_enabled: bool = False

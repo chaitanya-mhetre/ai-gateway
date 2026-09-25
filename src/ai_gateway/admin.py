@@ -1,38 +1,82 @@
-"""Control-plane API: tenants, projects, keys, provider health.
+"""Control-plane API: tenants, projects, keys, admins, provider health, usage.
 
-Protected by a separate admin bearer token (`GATEWAY_ADMIN_TOKEN`), so data-plane keys can never
-reach it. A production system would use SSO/JWT with roles; see README "Limitations".
+Authentication: a personal admin token per operator (`admin_users.py`), never a data-plane key.
+Authorization: every route declares exactly one `Permission` via `require(...)`; the role → permission
+table lives in `admin_users.ROLE_PERMISSIONS`. `tests/test_admin_rbac.py` fails if a route is added
+without a permission.
 """
 
 from __future__ import annotations
 
-import hmac
+import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 
+from ai_gateway.admin_users import (
+    AdminAuthenticator,
+    AdminAuthError,
+    AdminPrincipal,
+    LastOwnerError,
+    Permission,
+    Role,
+    create_admin_user,
+    disable_admin_user,
+)
 from ai_gateway.auth import KeyAuthenticator, generate_key, hash_key
 from ai_gateway.config import Settings
-from ai_gateway.db import ApiKey, Database, Project, Tenant, UsageEvent, utcnow
+from ai_gateway.db import AdminUser, ApiKey, Database, Project, Tenant, UsageEvent, utcnow
 from ai_gateway.gateway import Gateway
 from ai_gateway.metering.pricing import PriceTable
 
-
-def require_admin(request: Request, authorization: str | None = Header(default=None)) -> None:
-    settings: Settings = request.app.state.settings
-    token = (
-        authorization[7:] if authorization and authorization.lower().startswith("bearer ") else ""
-    )
-    if not token or not hmac.compare_digest(token, settings.admin_token):
-        raise HTTPException(status_code=401, detail="admin token required")
+audit_log = logging.getLogger("ai_gateway.admin.audit")
 
 
-router = APIRouter(prefix="/admin/v1", dependencies=[Depends(require_admin)], tags=["admin"])
+async def authenticate_admin(
+    request: Request, authorization: str | None = Header(default=None)
+) -> AdminPrincipal:
+    """Router-wide dependency: 401 unless the caller presents a valid, enabled admin token."""
+    authenticator: AdminAuthenticator = request.app.state.admin_authenticator
+    try:
+        principal = await authenticator.authenticate(authorization)
+    except AdminAuthError as exc:
+        raise HTTPException(401, str(exc), headers={"WWW-Authenticate": "Bearer"}) from exc
+    request.state.admin = principal
+    return principal
+
+
+def require(permission: Permission) -> Callable[..., Awaitable[AdminPrincipal]]:
+    """Per-route dependency: 403 unless the authenticated admin's role grants `permission`."""
+
+    async def check(
+        request: Request, admin: Annotated[AdminPrincipal, Depends(authenticate_admin)]
+    ) -> AdminPrincipal:
+        if not admin.can(permission):
+            raise HTTPException(403, f"role '{admin.role}' lacks permission '{permission}'")
+        if request.method != "GET":
+            # Who changed what: the minimum audit trail for a control plane.
+            audit_log.info(
+                "admin_action admin_id=%s email=%s role=%s permission=%s %s %s",
+                admin.id,
+                admin.email,
+                admin.role,
+                permission,
+                request.method,
+                request.url.path,
+            )
+        return admin
+
+    check.required_permission = permission  # type: ignore[attr-defined]  # read by the RBAC test
+    return check
+
+
+router = APIRouter(prefix="/admin/v1", dependencies=[Depends(authenticate_admin)], tags=["admin"])
 
 
 class TenantIn(BaseModel):
@@ -56,12 +100,17 @@ class KeyIn(BaseModel):
     expires_at: datetime | None = None
 
 
+class AdminIn(BaseModel):
+    email: EmailStr
+    role: Role
+
+
 def _db(request: Request) -> Database:
     db: Database = request.app.state.db
     return db
 
 
-@router.post("/tenants", status_code=201)
+@router.post("/tenants", status_code=201, dependencies=[Depends(require(Permission.TENANTS_WRITE))])
 async def create_tenant(body: TenantIn, request: Request) -> dict[str, Any]:
     async with _db(request).session() as s:
         tenant = Tenant(name=body.name)
@@ -73,7 +122,9 @@ async def create_tenant(body: TenantIn, request: Request) -> dict[str, Any]:
         return {"id": tenant.id, "name": tenant.name}
 
 
-@router.post("/projects", status_code=201)
+@router.post(
+    "/projects", status_code=201, dependencies=[Depends(require(Permission.PROJECTS_WRITE))]
+)
 async def create_project(body: ProjectIn, request: Request) -> dict[str, Any]:
     async with _db(request).session() as s:
         if await s.get(Tenant, body.tenant_id) is None:
@@ -87,7 +138,7 @@ async def create_project(body: ProjectIn, request: Request) -> dict[str, Any]:
         return {"id": project.id, "tenant_id": project.tenant_id, "name": project.name}
 
 
-@router.post("/keys", status_code=201)
+@router.post("/keys", status_code=201, dependencies=[Depends(require(Permission.KEYS_WRITE))])
 async def create_key(body: KeyIn, request: Request) -> dict[str, Any]:
     settings: Settings = request.app.state.settings
     plaintext, prefix = generate_key()
@@ -103,7 +154,7 @@ async def create_key(body: KeyIn, request: Request) -> dict[str, Any]:
         return {"id": key.id, "prefix": prefix, "key": plaintext, "project_id": key.project_id}
 
 
-@router.get("/keys")
+@router.get("/keys", dependencies=[Depends(require(Permission.KEYS_READ))])
 async def list_keys(project_id: str, request: Request) -> list[dict[str, Any]]:
     async with _db(request).session() as s:
         rows = (
@@ -123,7 +174,7 @@ async def list_keys(project_id: str, request: Request) -> list[dict[str, Any]]:
         ]
 
 
-@router.delete("/keys/{key_id}")
+@router.delete("/keys/{key_id}", dependencies=[Depends(require(Permission.KEYS_WRITE))])
 async def revoke_key(key_id: str, request: Request) -> dict[str, Any]:
     async with _db(request).session() as s:
         key = await s.get(ApiKey, key_id)
@@ -138,7 +189,7 @@ async def revoke_key(key_id: str, request: Request) -> dict[str, Any]:
         return {"id": key.id, "revoked": True}
 
 
-@router.get("/providers/health")
+@router.get("/providers/health", dependencies=[Depends(require(Permission.PROVIDERS_READ))])
 async def providers_health(request: Request) -> dict[str, Any]:
     gateway: Gateway = request.app.state.gateway
     latency = gateway.latency.snapshot()
@@ -153,7 +204,7 @@ async def providers_health(request: Request) -> dict[str, Any]:
     return out
 
 
-@router.get("/usage")
+@router.get("/usage", dependencies=[Depends(require(Permission.USAGE_READ))])
 async def usage(
     request: Request,
     project_id: str,
@@ -219,7 +270,70 @@ _AGG_FIELDS = {
 }
 
 
-@router.get("/prices")
+@router.get("/prices", dependencies=[Depends(require(Permission.PRICES_READ))])
 async def prices(request: Request) -> list[dict[str, Any]]:
     table: PriceTable = request.app.state.prices
     return [e.model_dump(mode="json") for e in table.entries]
+
+
+# --- admin users (owner only) --------------------------------------------------------------------
+
+
+def _admin_out(user: AdminUser) -> dict[str, Any]:
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "token_prefix": user.token_prefix,
+        "disabled": user.disabled_at is not None,
+        "created_by": user.created_by,
+    }
+
+
+@router.get("/me")
+async def me(admin: Annotated[AdminPrincipal, Depends(authenticate_admin)]) -> dict[str, Any]:
+    """Who am I and what may I do? Any authenticated admin may call this."""
+    return {
+        "id": admin.id,
+        "email": admin.email,
+        "role": str(admin.role),
+        "permissions": sorted(str(p) for p in Permission if admin.can(p)),
+    }
+
+
+me.public_to_any_admin = True  # type: ignore[attr-defined]  # read by the RBAC test
+
+
+@router.post("/admins", status_code=201)
+async def create_admin(
+    body: AdminIn,
+    request: Request,
+    admin: Annotated[AdminPrincipal, Depends(require(Permission.ADMINS_MANAGE))],
+) -> dict[str, Any]:
+    settings: Settings = request.app.state.settings
+    try:
+        user, token = await create_admin_user(
+            _db(request), settings.key_pepper, email=body.email, role=body.role, created_by=admin.id
+        )
+    except IntegrityError as exc:
+        raise HTTPException(409, "an admin with this email already exists") from exc
+    # The plaintext token is returned exactly once and never stored.
+    return {**_admin_out(user), "token": token}
+
+
+@router.get("/admins", dependencies=[Depends(require(Permission.ADMINS_MANAGE))])
+async def list_admins(request: Request) -> list[dict[str, Any]]:
+    async with _db(request).session() as s:
+        rows = (await s.execute(select(AdminUser).order_by(AdminUser.created_at))).scalars().all()
+    return [_admin_out(u) for u in rows]
+
+
+@router.delete("/admins/{admin_id}", dependencies=[Depends(require(Permission.ADMINS_MANAGE))])
+async def disable_admin(admin_id: str, request: Request) -> dict[str, Any]:
+    try:
+        user = await disable_admin_user(_db(request), admin_id)
+    except LastOwnerError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if user is None:
+        raise HTTPException(404, "admin not found")
+    return _admin_out(user)
