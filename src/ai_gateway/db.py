@@ -1,8 +1,9 @@
 """Database schema (SQLAlchemy 2.0, async) and a small repository.
 
 Postgres in production (asyncpg), SQLite in tests (aiosqlite). Types are kept portable on purpose,
-e.g. JSON instead of Postgres ARRAY. Tables are created with `metadata.create_all` on startup; a
-real deployment would use Alembic migrations (see docs/limitations in the README).
+e.g. JSON instead of Postgres ARRAY. The schema is owned by Alembic (`ai_gateway/migrations/`):
+`Database.migrate()` runs `upgrade head`. The ORM models here must stay in sync with the migration
+scripts; `tests/test_migrations.py` fails if they drift apart.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from sqlalchemy import (
     func,
     select,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -133,15 +135,54 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(url, **kwargs)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
-    async def create_all(self) -> None:
+    async def migrate(self, revision: str = "head") -> None:
+        """Bring the schema to `revision` with Alembic (idempotent: a no-op when already there)."""
         async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(_alembic_upgrade, revision)
+
+    async def downgrade(self, revision: str) -> None:
+        async with self.engine.begin() as conn:
+            await conn.run_sync(_alembic_downgrade, revision)
+
+    async def current_revision(self) -> str | None:
+        async with self.engine.connect() as conn:
+            return await conn.run_sync(_alembic_current)
 
     async def dispose(self) -> None:
         await self.engine.dispose()
 
     def session(self) -> AsyncSession:
         return self.sessions()
+
+
+def alembic_config(connection: Connection | None = None) -> Any:
+    """An Alembic Config pointing at the packaged migration scripts (works from an installed wheel)."""
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", "ai_gateway:migrations")
+    if connection is not None:
+        cfg.attributes["connection"] = connection
+    return cfg
+
+
+def _alembic_upgrade(connection: Connection, revision: str) -> None:
+    from alembic import command
+
+    command.upgrade(alembic_config(connection), revision)
+
+
+def _alembic_downgrade(connection: Connection, revision: str) -> None:
+    from alembic import command
+
+    command.downgrade(alembic_config(connection), revision)
+
+
+def _alembic_current(connection: Connection) -> str | None:
+    from alembic.runtime.migration import MigrationContext
+
+    rev: str | None = MigrationContext.configure(connection).get_current_revision()
+    return rev
 
 
 async def key_with_project(session: AsyncSession, prefix: str) -> tuple[ApiKey, Project] | None:

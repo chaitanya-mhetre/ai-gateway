@@ -137,7 +137,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await db.create_all()
+        if settings.auto_migrate:
+            await db.migrate()
         await sink.start()
         yield
         await sink.stop()

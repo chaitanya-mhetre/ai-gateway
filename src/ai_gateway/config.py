@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     max_body_bytes: int = 1_000_000
     max_tokens_cap: int = 16_384
     key_cache_ttl_s: float = 30.0
+    # Run `alembic upgrade head` on startup. Convenient for dev/tests; in production run
+    # `ai-gateway migrate` as a separate release step and set this to false.
+    auto_migrate: bool = True
 
 
 class MockOptions(BaseModel):

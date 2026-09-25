@@ -67,7 +67,7 @@ async def sdk(
     settings: Settings, providers: dict[str, Provider]
 ) -> AsyncIterator[openai.AsyncOpenAI]:
     app = create_app(settings, config=make_config(), providers=providers)
-    await app.state.db.create_all()
+    await app.state.db.migrate()
     http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
     # The SDK types its client against its vendored httpx fork; the stdlib httpx client is
     # runtime-compatible (duck-typed), which is all this in-process test needs.

@@ -1,4 +1,4 @@
-"""Command-line entry points: `ai-gateway serve` and `ai-gateway usage-worker`."""
+"""Command-line entry points: `ai-gateway serve | usage-worker | migrate`."""
 
 from __future__ import annotations
 
@@ -33,9 +33,23 @@ async def _worker(settings: Settings) -> None:
             "usage-worker needs GATEWAY_REDIS_URL (without Redis, events are written in-process)"
         )
     db = Database(settings.database_url)
-    await db.create_all()
+    if settings.auto_migrate:
+        await db.migrate()
     worker = UsageWorker(make_redis(settings.redis_url), db, consumer=socket.gethostname())
     await worker.run_forever()
+
+
+async def _migrate(settings: Settings, revision: str) -> None:
+    from ai_gateway.db import Database
+
+    db = Database(settings.database_url)
+    try:
+        before = await db.current_revision()
+        await db.migrate(revision)
+        after = await db.current_revision()
+        logging.getLogger("ai_gateway.migrate").info("schema revision %s -> %s", before, after)
+    finally:
+        await db.dispose()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -46,9 +60,13 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
     sub.add_parser("usage-worker", help="consume usage events from Redis into Postgres")
+    migrate = sub.add_parser("migrate", help="apply database migrations (alembic upgrade)")
+    migrate.add_argument("revision", nargs="?", default="head")
     args = parser.parse_args(argv)
     if args.command == "serve":
         _serve(args.host, args.port)
+    elif args.command == "migrate":
+        asyncio.run(_migrate(Settings(), args.revision))
     else:
         asyncio.run(_worker(Settings()))
 

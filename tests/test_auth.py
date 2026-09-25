@@ -37,7 +37,7 @@ class Clock:
 @pytest.fixture
 async def db() -> AsyncIterator[Database]:
     database = Database("sqlite+aiosqlite:///:memory:")
-    await database.create_all()
+    await database.migrate()
     yield database
     await database.dispose()
 
