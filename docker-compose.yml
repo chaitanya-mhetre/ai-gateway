@@ -1,0 +1,72 @@
+# Local stack. Host ports are deliberately unusual to avoid clashing with other local projects.
+services:
+  gateway:
+    build: .
+    environment:
+      GATEWAY_CONFIG_PATH: /app/config/gateway.yaml
+      GATEWAY_REDIS_URL: redis://redis:6379/0
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-dev-admin-token}
+      GATEWAY_KEY_PEPPER: ${GATEWAY_KEY_PEPPER:-dev-pepper}
+      GATEWAY_OTEL_ENABLED: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports: ["58080:8080"]
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  usage-worker:
+    build: .
+    command: ["ai-gateway", "usage-worker"]
+    environment:
+      GATEWAY_CONFIG_PATH: /app/config/gateway.yaml
+      GATEWAY_REDIS_URL: redis://redis:6379/0
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
+  redis:
+    image: redis:7-alpine
+    ports: ["56382:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports: ["55435:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 2s
+      retries: 30
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["59090:9090"]
+    profiles: ["observability"]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["53000:3000"]
+    profiles: ["observability"]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["51434:11434"]
+    profiles: ["local-models"]
