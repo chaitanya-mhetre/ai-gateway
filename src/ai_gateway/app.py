@@ -11,8 +11,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ai_gateway.config import GatewayConfig, Settings
-from ai_gateway.errors import GatewayError
-from ai_gateway.gateway import CallMeta, Gateway
+from ai_gateway.errors import GatewayError, InvalidRequestError
+from ai_gateway.gateway import CallMeta, Gateway, RequestOptions
 from ai_gateway.openai_compat import (
     ChunkEncoder,
     OpenAIChatRequest,
@@ -25,6 +25,26 @@ from ai_gateway.openai_compat import (
 )
 from ai_gateway.providers.base import Provider
 from ai_gateway.registry import build_providers
+
+_POLICIES = {"priority", "weighted", "cost", "latency"}
+_CACHE_MODES = {"bypass", "exact", "semantic"}
+
+
+def parse_options(request: Request) -> RequestOptions:
+    """Read the optional `X-Gateway-*` request headers."""
+    policy = request.headers.get("x-gateway-route-policy")
+    if policy is not None and policy not in _POLICIES:
+        raise InvalidRequestError(f"X-Gateway-Route-Policy must be one of {sorted(_POLICIES)}")
+    cache = request.headers.get("x-gateway-cache")
+    if cache is not None and cache not in _CACHE_MODES:
+        raise InvalidRequestError(f"X-Gateway-Cache must be one of {sorted(_CACHE_MODES)}")
+    timeout_raw = request.headers.get("x-gateway-timeout-ms")
+    timeout_ms: int | None = None
+    if timeout_raw is not None:
+        if not timeout_raw.isdigit() or int(timeout_raw) <= 0:
+            raise InvalidRequestError("X-Gateway-Timeout-Ms must be a positive integer")
+        timeout_ms = int(timeout_raw)
+    return RequestOptions(policy=policy, timeout_ms=timeout_ms, cache=cache)  # type: ignore[arg-type]
 
 
 def _meta_headers(meta: CallMeta, request_id: str) -> dict[str, str]:
@@ -69,11 +89,14 @@ def create_app(
         )
 
     @app.post("/v1/chat/completions", response_model=None)
-    async def chat_completions(body: OpenAIChatRequest) -> JSONResponse | StreamingResponse:
+    async def chat_completions(
+        body: OpenAIChatRequest, request: Request
+    ) -> JSONResponse | StreamingResponse:
         request_id = new_request_id()
+        opts = parse_options(request)
         req = to_internal(body, max_tokens_cap=settings.max_tokens_cap)
         if req.stream:
-            chunks, meta = await gateway.stream(req)
+            chunks, meta = await gateway.stream(req, opts)
             encoder = ChunkEncoder(request_id, meta.model or req.model)
 
             async def sse() -> AsyncIterator[str]:
@@ -89,15 +112,15 @@ def create_app(
             return StreamingResponse(
                 sse(), media_type="text/event-stream", headers=_meta_headers(meta, request_id)
             )
-        resp, meta = await gateway.chat(req)
+        resp, meta = await gateway.chat(req, opts)
         return JSONResponse(
             response_to_openai(resp, request_id), headers=_meta_headers(meta, request_id)
         )
 
     @app.post("/v1/embeddings")
-    async def embeddings(body: OpenAIEmbeddingRequest) -> JSONResponse:
+    async def embeddings(body: OpenAIEmbeddingRequest, request: Request) -> JSONResponse:
         request_id = new_request_id()
-        resp, meta = await gateway.embed(embedding_to_internal(body))
+        resp, meta = await gateway.embed(embedding_to_internal(body), parse_options(request))
         return JSONResponse(embeddings_to_openai(resp), headers=_meta_headers(meta, request_id))
 
     @app.get("/v1/models")

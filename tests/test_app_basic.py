@@ -91,3 +91,74 @@ async def test_official_openai_sdk_streaming(sdk: openai.AsyncOpenAI) -> None:
 async def test_official_openai_sdk_embeddings(sdk: openai.AsyncOpenAI) -> None:
     resp = await sdk.embeddings.create(model="embed-default", input="hello")
     assert len(resp.data[0].embedding) == 16
+
+
+async def test_invalid_policy_header_is_400(client: httpx.AsyncClient) -> None:
+    r = await client.post(
+        "/v1/chat/completions",
+        json={"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]},
+        headers={"X-Gateway-Route-Policy": "fastest"},
+    )
+    assert r.status_code == 400
+
+
+async def test_fallback_visible_in_headers(settings: Settings) -> None:
+    from ai_gateway.providers.mock import MockProvider, http_5xx
+
+    providers: dict[str, Provider] = {
+        "primary": MockProvider("primary", script=[http_5xx()]),
+        "secondary": MockProvider("secondary"),
+        "local": MockProvider("local"),
+    }
+    app = create_app(settings, config=make_config(), providers=providers)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        r = await c.post(
+            "/v1/chat/completions",
+            json={"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert r.status_code == 200
+    assert r.headers["x-gateway-provider"] == "secondary"
+    assert r.headers["x-gateway-attempts"] == "2"
+
+
+async def test_mid_stream_failure_becomes_in_band_error_event(settings: Settings) -> None:
+    from ai_gateway.providers.mock import MockProvider
+
+    providers: dict[str, Provider] = {
+        "primary": MockProvider("primary", reply="abcdefghijkl", chunk_size=4, stream_fail_after=1),
+        "secondary": MockProvider("secondary"),
+        "local": MockProvider("local"),
+    }
+    app = create_app(settings, config=make_config(), providers=providers)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        r = await c.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat-default",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert r.status_code == 200
+    events = [line for line in r.text.split("\n\n") if line]
+    assert '"content":"abcd"' in events[0]
+    assert '"type": "provider_error"' in events[-2]
+    assert events[-1] == "data: [DONE]"
+
+
+async def test_all_targets_failing_returns_502(settings: Settings) -> None:
+    from ai_gateway.providers.mock import MockProvider, http_5xx
+
+    providers: dict[str, Provider] = {
+        "primary": MockProvider("primary", script=[http_5xx()]),
+        "secondary": MockProvider("secondary", script=[http_5xx()]),
+        "local": MockProvider("local"),
+    }
+    app = create_app(settings, config=make_config(), providers=providers)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        r = await c.post(
+            "/v1/chat/completions",
+            json={"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "all_targets_failed"
