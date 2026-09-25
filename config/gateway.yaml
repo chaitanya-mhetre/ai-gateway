@@ -1,0 +1,21 @@
+# Default config: runs fully offline against mock providers.
+# See config/gateway.example.yaml for a real multi-provider setup.
+providers:
+  mock-primary:
+    type: mock
+    mock: {latency_ms: 50, reply: "Hello from mock-primary."}
+  mock-secondary:
+    type: mock
+    mock: {latency_ms: 80, reply: "Hello from mock-secondary."}
+
+aliases:
+  chat-default:
+    policy: priority
+    targets:
+      - {provider: mock-primary, model: mock-large, priority: 1}
+      - {provider: mock-secondary, model: mock-small, priority: 2}
+    deadline_ms: 30000
+  embed-default:
+    embedding: true
+    targets:
+      - {provider: mock-primary, model: mock-embed}
