@@ -1,0 +1,71 @@
+[project]
+name = "ai-gateway"
+version = "0.1.0"
+description = "Self-hosted OpenAI-compatible LLM gateway: routing, fallback, caching, quotas, metering"
+readme = "README.md"
+authors = [
+    { name = "Chaitanya Mhetre", email = "mhetrechaitanya06@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "prometheus-client>=0.26.0",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "redis>=5",
+    "sqlalchemy[asyncio]>=2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "openai>=3.19.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.9",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[project.scripts]
+ai-gateway = "ai_gateway.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "ASYNC", "RUF"]
+# E501: line length is the formatter's job. ASYNC109: adapters take the *remaining deadline*
+# as `timeout` on purpose, because it must also configure httpx's per-operation timeouts.
+ignore = ["RUF012", "E501", "ASYNC109"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "redis: needs a real Redis (REDIS_URL, default redis://localhost:56382/0)",
+  "live: calls real provider APIs (manual only)",
+]
+addopts = "-m 'not live'"
