@@ -3,6 +3,9 @@
 Rules, in order of precedence:
 1. One overall deadline per request. Every attempt gets only the *remaining* budget, so retries can
    never make a request exceed its deadline (this prevents retry storms from piling up latency).
+   A non-streaming attempt is additionally capped by its provider's `timeout_ms`, so one hung
+   provider can't spend the whole deadline and leave nothing for fallback (streams use
+   `first_token_timeout_ms` for the same purpose).
 2. A target whose circuit is open is skipped instantly (recorded as `circuit_open`).
 3. Retryable errors (timeout, 5xx, 429, connection) are retried on the same target, up to
    `max_attempts_per_target`, with jittered backoff that honours `Retry-After`.
@@ -101,8 +104,10 @@ class Executor:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         rng: random.Random | None = None,
+        attempt_timeouts: dict[str, float] | None = None,
     ) -> None:
         self.providers = providers
+        self.attempt_timeouts = attempt_timeouts or {}
         self.breaker = breaker
         self.latency = latency
         self.listener = listener or ExecutionListener()
@@ -214,6 +219,11 @@ class Executor:
 
         raise AllTargetsFailedError(alias_name, info.errors)
 
+    def _attempt_budget(self, provider: str, remaining: float) -> float:
+        """Seconds one non-streaming attempt may take: the provider cap, never past the deadline."""
+        cap = self.attempt_timeouts.get(provider)
+        return remaining if cap is None else min(cap, remaining)
+
     # --- public entry points ------------------------------------------------------------------
     async def chat(
         self,
@@ -224,7 +234,7 @@ class Executor:
         deadline_s: float,
     ) -> tuple[ChatResponse, ExecInfo]:
         async def call(p: Provider, t: TargetConfig, remaining: float) -> ChatResponse:
-            return await p.chat(req, t.model, remaining)
+            return await p.chat(req, t.model, self._attempt_budget(t.provider, remaining))
 
         return await self._run(alias_name, alias, targets, deadline_s, call)
 
@@ -237,7 +247,7 @@ class Executor:
         deadline_s: float,
     ) -> tuple[EmbeddingResponse, ExecInfo]:
         async def call(p: Provider, t: TargetConfig, remaining: float) -> EmbeddingResponse:
-            return await p.embed(req, t.model, remaining)
+            return await p.embed(req, t.model, self._attempt_budget(t.provider, remaining))
 
         return await self._run(alias_name, alias, targets, deadline_s, call)
 

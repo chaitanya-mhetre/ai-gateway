@@ -85,7 +85,12 @@ class Gateway:
         self.listener = listener
         self.rng = rng or random.Random()
         self.executor = Executor(
-            providers, self.breaker, self.latency, listener=listener, rng=self.rng
+            providers,
+            self.breaker,
+            self.latency,
+            listener=listener,
+            rng=self.rng,
+            attempt_timeouts={name: pc.timeout_ms / 1000 for name, pc in config.providers.items()},
         )
 
     # --- resolution -----------------------------------------------------------------------------

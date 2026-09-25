@@ -46,7 +46,9 @@ class ProviderConfig(BaseModel):
     api_key_env: str | None = (
         None  # name of the env var holding the secret; never the secret itself
     )
-    timeout_ms: int = 30_000
+    # Max duration of ONE non-streaming attempt (capped by the request's remaining deadline).
+    # Keep it well below the alias `deadline_ms` so a hung provider leaves time to fall back.
+    timeout_ms: int = Field(default=30_000, ge=1)
     enabled: bool = True
     mock: MockOptions = Field(default_factory=MockOptions)
 

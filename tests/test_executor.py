@@ -63,6 +63,7 @@ def make(
     primary: MockProvider,
     secondary: MockProvider | None = None,
     breaker: InMemoryBreaker | None = None,
+    attempt_timeouts: dict[str, float] | None = None,
 ) -> tuple[Executor, Recorder, Sleeps, dict[str, Provider]]:
     providers: dict[str, Provider] = {
         "primary": primary,
@@ -75,6 +76,7 @@ def make(
         LatencyTracker(),
         listener=rec,
         sleep=sleeps,
+        attempt_timeouts=attempt_timeouts,
     )
     return ex, rec, sleeps, providers
 
@@ -158,6 +160,27 @@ async def test_overall_deadline_bounds_total_time() -> None:
     with pytest.raises(AllTargetsFailedError) as exc:
         await ex.chat("chat", a, a.targets, REQ, 0.05)
     assert all(e.reason == err.TIMEOUT for e in exc.value.errors)
+
+
+async def test_hung_provider_is_capped_by_its_timeout_and_falls_back() -> None:
+    """Found by bench/outage.py: without a per-attempt cap, a hung primary used the whole
+    deadline and every request failed even though the secondary was healthy."""
+    hung = MockProvider("primary", latency=5.0)
+    ex, rec, _, _ = make(hung, attempt_timeouts={"primary": 0.05, "secondary": 0.05})
+    a = alias_cfg(attempts=1)
+    resp, info = await ex.chat("chat", a, a.targets, REQ, 1.0)
+    assert info.provider == "secondary" and info.attempts == 2
+    assert rec.fallbacks == [("primary", "secondary", err.TIMEOUT)]
+    assert resp.content
+
+
+async def test_attempt_cap_never_extends_the_deadline() -> None:
+    slow = MockProvider("primary", latency=5.0)
+    slow2 = MockProvider("secondary", latency=5.0)
+    ex, _, _, _ = make(slow, slow2, attempt_timeouts={"primary": 10.0, "secondary": 10.0})
+    a = alias_cfg(attempts=1)
+    with pytest.raises(AllTargetsFailedError):
+        await ex.chat("chat", a, a.targets, REQ, 0.05)  # the 50 ms deadline wins over the 10 s cap
 
 
 async def test_fallback_disabled_for_reason_stops() -> None:
