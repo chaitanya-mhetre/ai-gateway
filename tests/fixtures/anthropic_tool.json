@@ -1,0 +1,4 @@
+{"id": "msg_02", "type": "message", "role": "assistant", "model": "claude-test",
+ "content": [{"type": "text", "text": "Checking."},
+             {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Pune"}}],
+ "stop_reason": "tool_use", "usage": {"input_tokens": 20, "output_tokens": 15}}
