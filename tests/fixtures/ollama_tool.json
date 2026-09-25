@@ -1,0 +1,2 @@
+{"model": "llama-test", "message": {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Pune"}}}]},
+ "done": true, "done_reason": "stop", "prompt_eval_count": 25, "eval_count": 9}

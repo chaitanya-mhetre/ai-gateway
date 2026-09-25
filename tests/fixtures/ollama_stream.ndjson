@@ -1,0 +1,3 @@
+{"model":"llama-test","message":{"role":"assistant","content":"Hel"},"done":false}
+{"model":"llama-test","message":{"role":"assistant","content":"lo"},"done":false}
+{"model":"llama-test","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","prompt_eval_count":5,"eval_count":2}

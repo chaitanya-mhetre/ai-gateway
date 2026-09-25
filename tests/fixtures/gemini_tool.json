@@ -1,0 +1,2 @@
+{"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Pune"}}}]}, "finishReason": "STOP"}],
+ "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 5}}

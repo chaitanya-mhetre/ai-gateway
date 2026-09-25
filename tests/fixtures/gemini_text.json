@@ -1,0 +1,3 @@
+{"candidates": [{"content": {"role": "model", "parts": [{"text": "Hello "}, {"text": "there"}]}, "finishReason": "STOP"}],
+ "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 2, "totalTokenCount": 10, "cachedContentTokenCount": 3},
+ "modelVersion": "gemini-test", "responseId": "resp_1"}
