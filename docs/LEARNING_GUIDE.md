@@ -47,7 +47,7 @@ Three ideas carry the whole design:
 | 18 | `src/ai_gateway/metering/*` | Token estimation, price table, usage events, Streams worker. |
 | 19 | `src/ai_gateway/observability/*` | Metric types, label cardinality, spans. |
 | 20 | `src/ai_gateway/service.py` | Orchestration: admit → cache → gateway → cost → settle → record. |
-| 21 | `src/ai_gateway/app.py`, `admin.py` | HTTP surface, dependency wiring (Redis vs in-memory), lifespan. |
+| 21 | `src/ai_gateway/app.py`, `admin.py`, `admin_users.py` | HTTP surface, dependency wiring (Redis vs in-memory), lifespan; admin roles, `require(permission)`. |
 | 22 | `src/ai_gateway/db.py`, `migrations/` | ORM models; `Database.migrate()`; the Alembic scripts that actually own the schema. |
 | 23 | `tests/test_executor.py` | Read the tests as a *specification* of the reliability rules. |
 
@@ -163,6 +163,23 @@ in `db.py` and `ai-gateway migrate` in `cli.py`.
   `GATEWAY_AUTO_MIGRATE=false`.
 - **SQLite quirks.** SQLite can't `ALTER` most things in place; `render_as_batch=True` makes Alembic
   copy the table instead, so the same scripts work in tests and on Postgres.
+
+### 3.15 Admin RBAC: authentication vs authorization
+`src/ai_gateway/admin_users.py` (roles, permissions, tokens) and `admin.py` (`authenticate_admin`, `require`).
+- **Why not one shared admin token?** You can't tell who did what, you can't give someone read-only
+  access, and removing one person means rotating the secret for everyone.
+- **Two steps, two status codes.** `authenticate_admin` (router-wide) answers *who are you?* and returns
+  **401** with `WWW-Authenticate: Bearer`. `require(Permission.X)` (per route) answers *may you do this?*
+  and returns **403**. Mixing them up is a classic API bug.
+- **Rules as data.** `ROLE_PERMISSIONS` maps role → permission set; routes ask for a *permission*, never
+  a role. Adding a role (say `billing`) means editing one dict, not every route.
+- **Fail closed.** `test_every_admin_route_declares_a_permission` inspects FastAPI's dependency tree
+  and fails if a route has no `require(...)`, so a forgotten check can't reach main.
+- **Tokens like API keys.** Random 256-bit secret, public prefix for lookup, HMAC-SHA256 with a pepper at
+  rest, constant-time compare, one error message for every failure (no enumeration oracle).
+- **No auth cache on the admin plane** (unlike data-plane keys): disabling an admin works immediately on
+  every replica, and admin traffic is too low for the extra DB lookup to matter.
+- **Lockout protection.** The last active owner can't be disabled (409).
 
 ## 4. Things to try (hands-on)
 
@@ -283,7 +300,8 @@ isolates vendor changes to one adapter each.
 
 **Q23. How do you keep tenants isolated?**
 Tenant in the exact-cache key, per-tenant semantic indexes, usage and budgets keyed by project, and
-per-key alias allow-lists. The admin plane has a separate credential.
+per-key alias allow-lists. The admin plane uses separate personal admin tokens; a data-plane key
+gets 401 there.
 
 **Q24. How would you scale usage analytics to billions of rows?**
 Partition `usage_events` by month, keep daily rollups for dashboards, and move raw events to a
@@ -305,6 +323,23 @@ switch reads, then drop the old column in a later migration. Never rename-in-pla
 **Q28. How do you know the ORM models and the migrations agree?**
 A test runs all migrations on an empty database and asks Alembic's `compare_metadata` for the diff
 against the models; it must be empty (`tests/test_migrations.py`). CI runs it on Postgres too.
+
+**Q29. 401 vs 403?**
+401: we don't know who you are (missing, malformed, wrong or disabled credential); send
+`WWW-Authenticate`. 403: we know who you are, and your role doesn't allow this action. Returning 403
+for a bad token leaks that the route exists and wastes the client's retry logic.
+
+**Q30. How do you make sure nobody adds an admin endpoint without an authorization check?**
+Router-wide authentication, plus a per-route permission dependency, plus a test that walks every
+route's dependency tree and fails if the permission dependency is missing. Default-deny enforced in CI.
+
+**Q31. Why check permissions instead of roles in the routes?**
+Roles change (new roles, split roles); permissions describe actions and stay stable. With
+role → permission as data, a new role is one dict entry and no route changes.
+
+**Q32. Next step beyond personal tokens?**
+SSO/OIDC for humans (short-lived JWTs from the company IdP, roles mapped from IdP groups), keep
+long-lived tokens only for automation, and move the audit log into an append-only table.
 
 ---
 

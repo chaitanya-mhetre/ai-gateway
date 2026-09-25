@@ -75,7 +75,7 @@ More detail: [docs/architecture.md](docs/architecture.md). Provider format notes
 | Metering | versioned price table → estimated cost; usage events through Redis Streams with an at-least-once worker and idempotent inserts; daily rollups; usage API |
 | Caching | exact cache (temperature 0 or opt-in, tenant-isolated); semantic cache (opt-in, threshold, similarity reported) |
 | Observability | 13 Prometheus metrics, OTel spans (no prompt content), 12-panel Grafana dashboard |
-| Admin | tenants, projects, keys, provider health, usage, prices (separate admin token) |
+| Admin | tenants, projects, keys, admin users, provider health, usage, prices (personal admin tokens + roles) |
 
 ## Tech stack
 
@@ -90,7 +90,7 @@ classification, and it forces understanding of each wire format.
 ```bash
 # 1. Offline, no keys needed: mock providers
 docker compose up -d --build            # gateway :58080, redis :56382, postgres :55435, usage-worker
-./examples/quickstart.sh                 # creates tenant → project → key, calls the gateway, shows usage
+./examples/quickstart.sh                 # creates an owner admin, then tenant → project → key; calls the gateway
 
 # 2. With dashboards
 docker compose --profile observability up -d   # prometheus :59090, grafana :53000 (dashboard "AI Gateway")
@@ -119,9 +119,26 @@ curl localhost:58080/v1/chat/completions \
 | `X-Gateway-Cache` | `bypass` · `exact` (opt in even at temperature > 0) · `semantic` |
 | `X-Gateway-Timeout-Ms` | overall deadline (capped at the alias deadline) |
 
-Admin (`Authorization: Bearer $GATEWAY_ADMIN_TOKEN`): `POST /admin/v1/tenants`, `POST /admin/v1/projects`,
-`POST|GET /admin/v1/keys`, `DELETE /admin/v1/keys/{id}`, `GET /admin/v1/usage?project_id=&group_by=model|day|key`,
-`GET /admin/v1/providers/health`, `GET /admin/v1/prices`. OpenAPI UI at `/docs`.
+### Admin plane
+
+Admins are users with roles, each with a personal token (`ga_…`). Create the first owner from the CLI,
+then manage the rest over the API:
+
+```bash
+docker compose run --rm gateway ai-gateway create-admin --email you@example.com --role owner   # prints the token once
+```
+
+| Role | Can |
+|---|---|
+| `viewer` | read usage, key metadata, provider health, prices |
+| `operator` | viewer + create tenants/projects, create/revoke API keys |
+| `owner` | operator + create/list/disable admins |
+
+Endpoints (`Authorization: Bearer <admin token>`): `GET /admin/v1/me`, `POST|GET /admin/v1/admins`,
+`DELETE /admin/v1/admins/{id}`, `POST /admin/v1/tenants`, `POST /admin/v1/projects`, `POST|GET /admin/v1/keys`,
+`DELETE /admin/v1/keys/{id}`, `GET /admin/v1/usage?project_id=&group_by=model|day|key`,
+`GET /admin/v1/providers/health`, `GET /admin/v1/prices`. 401 = no/invalid token, 403 = role lacks the
+permission. OpenAPI UI at `/docs`.
 
 ## Testing
 
@@ -156,7 +173,10 @@ uv run pytest -m live      # manual: one tiny call per real provider (needs keys
 - Tenant isolation: cache keys and semantic indexes are tenant-scoped; usage and budgets are per project.
 - Prompt/response content is not logged and never goes into spans or metrics labels.
 - Input limits: body size, `max_tokens` cap, message count, and at most 4 stop sequences. Text-only content (v1).
-- The admin plane uses a separate token (production should use SSO/JWT with roles; see Limitations).
+- The admin plane uses personal tokens (hashed like API keys) with three roles; every route declares one
+  permission, and a test fails if a new route forgets to. Disabling an admin takes effect on their next request
+  (no auth cache). Mutating admin calls are written to the `ai_gateway.admin.audit` log with who did what.
+  The last active owner can't be disabled.
 
 ## Performance (measured)
 
@@ -192,7 +212,8 @@ cache hit rates, cost accuracy against provider dashboards.
 ## Limitations
 
 - No Postgres partitioning of `usage_events` yet (the schema is managed by Alembic; see `ai_gateway/migrations/`).
-- The admin API uses a static bearer token, not SSO/RBAC; price and route edits are config files, not DB-backed.
+- Admin auth is personal tokens + roles, not SSO/OIDC; the audit trail is a log stream, not a table.
+  Price and route edits are config files, not DB-backed.
 - The semantic cache is an in-memory brute-force index (per replica). Production would use pgvector or Redis vector search.
 - Text-only messages (no images/audio). Anthropic-native `/v1/messages` isn't exposed.
 - Gemini support targets `generateContent`; Google's newer Interactions API isn't implemented.

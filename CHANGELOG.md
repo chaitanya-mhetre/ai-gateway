@@ -10,8 +10,18 @@
 - `tests/test_migrations.py`: upgrade from empty, downgrade to base, idempotency, data survives
   step-by-step upgrades, and a model-vs-migration drift check. Runs on SQLite and, in CI, on Postgres.
 
+- Admin users with roles (`owner`, `operator`, `viewer`) and personal tokens (`ga_…`, HMAC-hashed with
+  the pepper). Migration `0002` adds `admin_users`. New endpoints: `GET /admin/v1/me`,
+  `POST|GET /admin/v1/admins`, `DELETE /admin/v1/admins/{id}` (disable; the last owner is protected).
+- `ai-gateway create-admin --email --role` bootstraps the first owner and prints its token once.
+- Every admin route declares one permission; `tests/test_admin_rbac.py` checks the full role ×
+  permission matrix and fails if a route is added without a permission.
+- Mutating admin calls are logged to `ai_gateway.admin.audit` (admin id, email, role, permission, route).
+
 ### Removed
 - `Database.create_all()`: the schema is no longer created from the ORM models at startup.
+- `GATEWAY_ADMIN_TOKEN` (the single shared admin secret). If it's still set, the app logs a warning and
+  ignores it.
 
 ## [0.1.0] - 2026-09-25
 Built milestone by milestone (git tags `m1`…`m7`).
