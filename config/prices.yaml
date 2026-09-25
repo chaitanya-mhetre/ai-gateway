@@ -1,0 +1,21 @@
+# Price table (USD per 1M tokens). ESTIMATES ONLY.
+#
+# Rules:
+# - Every entry records `source` (the provider pricing page) and `checked_on` (when you checked).
+# - Real providers are intentionally NOT pre-filled: prices change, and this repo must not ship
+#   numbers that look authoritative but are stale. Copy them from the provider page yourself.
+# - Models without an entry report cost as unknown (null), never as free.
+prices:
+  # Fake prices for the offline mock providers, so dashboards and cost routing work in demos.
+  - {provider: mock-primary,   model: "mock-*", effective_from: 2026-01-01, input_per_mtok: 3.00, output_per_mtok: 15.00, source: FAKE}
+  - {provider: mock-secondary, model: "mock-*", effective_from: 2026-01-01, input_per_mtok: 0.50, output_per_mtok: 1.50,  source: FAKE}
+
+  # Template for a real entry:
+  # - provider: openai
+  #   model: <model-name>
+  #   effective_from: 2026-09-01
+  #   input_per_mtok: <from pricing page>
+  #   output_per_mtok: <from pricing page>
+  #   cached_input_per_mtok: <optional>
+  #   source: https://openai.com/api/pricing/
+  #   checked_on: 2026-09-25

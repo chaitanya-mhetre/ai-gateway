@@ -8,6 +8,8 @@ providers:
     type: mock
     mock: {latency_ms: 80, reply: "Hello from mock-secondary."}
 
+price_table_path: prices.yaml
+
 aliases:
   chat-default:
     policy: priority
