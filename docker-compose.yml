@@ -1,8 +1,18 @@
 # Local stack. Host ports are deliberately unusual to avoid clashing with other local projects.
 services:
+  # One-shot release step: apply migrations before the app starts (the app itself won't touch DDL).
+  migrate:
+    build: .
+    command: ["ai-gateway", "migrate"]
+    environment:
+      GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+    depends_on:
+      postgres: {condition: service_healthy}
+
   gateway:
     build: .
     environment:
+      GATEWAY_AUTO_MIGRATE: "false"
       GATEWAY_CONFIG_PATH: /app/config/gateway.yaml
       GATEWAY_REDIS_URL: redis://redis:6379/0
       GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
@@ -15,18 +25,19 @@ services:
     ports: ["58080:8080"]
     depends_on:
       redis: {condition: service_healthy}
-      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
 
   usage-worker:
     build: .
     command: ["ai-gateway", "usage-worker"]
     environment:
+      GATEWAY_AUTO_MIGRATE: "false"
       GATEWAY_CONFIG_PATH: /app/config/gateway.yaml
       GATEWAY_REDIS_URL: redis://redis:6379/0
       GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
     depends_on:
       redis: {condition: service_healthy}
-      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
 
   redis:
     image: redis:7-alpine

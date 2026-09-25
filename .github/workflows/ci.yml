@@ -14,6 +14,12 @@ jobs:
         ports: ["56382:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: gateway, POSTGRES_PASSWORD: gateway, POSTGRES_DB: gateway}
+        ports: ["55435:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gateway" --health-interval 2s --health-timeout 2s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -25,9 +31,14 @@ jobs:
         run: uv run ruff check . && uv run ruff format --check .
       - name: Type-check
         run: uv run mypy
-      - name: Tests (incl. Redis Lua scripts)
+      - name: Migrations from an empty Postgres (alembic upgrade head)
+        env:
+          GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@localhost:55435/gateway
+        run: uv run ai-gateway migrate
+      - name: Tests (incl. Redis Lua scripts, migrations on Postgres)
         env:
           REDIS_URL: redis://localhost:56382/0
+          POSTGRES_URL: postgresql+asyncpg://gateway:gateway@localhost:55435/gateway
         run: uv run pytest -q
 
   docker:
