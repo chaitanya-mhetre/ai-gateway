@@ -14,6 +14,9 @@ from redis.asyncio import Redis
 
 from ai_gateway import admin
 from ai_gateway.auth import ANONYMOUS, KeyAuthenticator, Principal
+from ai_gateway.cache.exact import CacheStore, InMemoryCacheStore, RedisCacheStore
+from ai_gateway.cache.layer import ResponseCache
+from ai_gateway.cache.semantic import SemanticCache
 from ai_gateway.config import GatewayConfig, Settings
 from ai_gateway.db import Database
 from ai_gateway.errors import GatewayError, InvalidRequestError
@@ -29,6 +32,7 @@ from ai_gateway.limits import (
 )
 from ai_gateway.metering.pricing import PriceTable
 from ai_gateway.metering.usage import InProcessSink, RedisStreamSink, UsageSink
+from ai_gateway.models import EmbeddingRequest
 from ai_gateway.observability.metrics import Metrics
 from ai_gateway.observability.tracing import setup_tracing
 from ai_gateway.openai_compat import (
@@ -69,13 +73,16 @@ def parse_options(request: Request) -> RequestOptions:
 
 
 def _meta_headers(meta: CallMeta, request_id: str) -> dict[str, str]:
-    return {
+    headers = {
         "X-Request-Id": request_id,
         "X-Gateway-Provider": meta.provider,
         "X-Gateway-Model": meta.model,
         "X-Gateway-Attempts": str(meta.attempts),
         "X-Gateway-Cache": meta.cache,
     }
+    if meta.similarity is not None:
+        headers["X-Gateway-Cache-Similarity"] = f"{meta.similarity:.4f}"
+    return headers
 
 
 def create_app(
@@ -111,8 +118,21 @@ def create_app(
     db = Database(settings.database_url)
     sink: UsageSink = RedisStreamSink(redis) if redis else InProcessSink(db)
     authenticator = KeyAuthenticator(db, settings.key_pepper, cache_ttl_s=settings.key_cache_ttl_s)
+    cache_store: CacheStore = RedisCacheStore(redis) if redis else InMemoryCacheStore()
+
+    async def embed_for_cache(text: str) -> list[float]:
+        alias = config.cache.semantic_embedding_alias
+        resp, _ = await gateway.embed(EmbeddingRequest(model=alias, input=[text]))
+        return resp.vectors[0]
+
+    semantic = (
+        SemanticCache(embed_for_cache, threshold=config.cache.semantic_threshold)
+        if config.cache.semantic_enabled
+        else None
+    )
+    cache = ResponseCache(cache_store, config.cache, metrics, semantic)
     service = GatewayService(
-        gateway, Guard(limiter, budgets), prices=prices, sink=sink, metrics=metrics
+        gateway, Guard(limiter, budgets), prices=prices, sink=sink, metrics=metrics, cache=cache
     )
 
     @asynccontextmanager

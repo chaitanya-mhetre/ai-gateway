@@ -45,6 +45,7 @@ class CallMeta:
     attempts: int = 0
     fallback_used: bool = False
     cache: str = "miss"
+    similarity: float | None = None
     ttft_ms: float | None = None
     provider_time_s: float = 0.0
     errors: list[str] = field(default_factory=list)

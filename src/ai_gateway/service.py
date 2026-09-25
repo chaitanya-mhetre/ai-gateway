@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable
 from decimal import Decimal
 
 from ai_gateway.auth import Principal
+from ai_gateway.cache.layer import CacheLookup, ResponseCache
 from ai_gateway.errors import AllTargetsFailedError, GatewayError, RateLimitedError
 from ai_gateway.gateway import CallMeta, Gateway, RequestOptions
 from ai_gateway.limits import Guard, Reservation
@@ -27,6 +28,7 @@ from ai_gateway.models import (
     EmbeddingRequest,
     EmbeddingResponse,
     StreamChunk,
+    ToolCallDelta,
     Usage,
 )
 from ai_gateway.observability.metrics import Metrics
@@ -43,6 +45,7 @@ class GatewayService:
         prices: PriceTable,
         sink: UsageSink,
         metrics: Metrics,
+        cache: ResponseCache | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.gateway = gateway
@@ -50,6 +53,7 @@ class GatewayService:
         self.prices = prices
         self.sink = sink
         self.metrics = metrics
+        self.cache = cache
         self.clock = clock
 
     # --- helpers --------------------------------------------------------------------------------
@@ -163,6 +167,46 @@ class GatewayService:
             error_type=exc.error_type,
         )
 
+    async def _cache_lookup(
+        self, principal: Principal, req: ChatRequest, opts: RequestOptions
+    ) -> CacheLookup:
+        if self.cache is None:
+            return CacheLookup()
+        return await self.cache.lookup(principal.tenant_scope, req, opts.cache)
+
+    async def _serve_hit(
+        self,
+        lookup: CacheLookup,
+        reservation: Reservation,
+        *,
+        request_id: str,
+        principal: Principal,
+        alias: str,
+        started: float,
+        stream: bool,
+    ) -> CallMeta:
+        assert lookup.response is not None
+        meta = CallMeta(
+            alias=alias,
+            provider=lookup.response.provider,
+            model=lookup.response.model,
+            cache=lookup.kind,
+            similarity=lookup.similarity,
+        )
+        # A cache hit consumed no provider tokens: refund the reservation, charge nothing.
+        await self.guard.settle(reservation, 0, Decimal(0))
+        await self._record(
+            request_id=request_id,
+            principal=principal,
+            alias=alias,
+            meta=meta,
+            usage=Usage(),
+            cost=Decimal(0),
+            started=started,
+            stream=stream,
+        )
+        return meta
+
     # --- entry points ---------------------------------------------------------------------------
     async def chat(
         self, principal: Principal, req: ChatRequest, opts: RequestOptions, request_id: str
@@ -172,6 +216,19 @@ class GatewayService:
             "gateway.request", attributes={"gateway.alias": req.model, "gateway.stream": False}
         ) as span:
             reservation = await self._admit(principal, req.model, estimate_request_tokens(req))
+            lookup = await self._cache_lookup(principal, req, opts)
+            if lookup.response is not None:
+                meta = await self._serve_hit(
+                    lookup,
+                    reservation,
+                    request_id=request_id,
+                    principal=principal,
+                    alias=req.model,
+                    started=started,
+                    stream=False,
+                )
+                span.set_attribute("gateway.cache", lookup.kind)
+                return lookup.response, meta
             try:
                 resp, meta = await self.gateway.chat(req, opts)
             except GatewayError as exc:
@@ -185,6 +242,8 @@ class GatewayService:
                     stream=False,
                 )
                 raise
+            if self.cache is not None:
+                await self.cache.save(lookup, req, resp)
             cost = self.prices.cost(meta.provider, meta.model, resp.usage)
             await self.guard.settle(reservation, resp.usage.total_tokens, cost or Decimal(0))
             await self._record(
@@ -213,6 +272,18 @@ class GatewayService:
     ) -> tuple[AsyncIterator[StreamChunk], CallMeta]:
         started = self.clock()
         reservation = await self._admit(principal, req.model, estimate_request_tokens(req))
+        lookup = await self._cache_lookup(principal, req, opts)
+        if lookup.response is not None:
+            meta = await self._serve_hit(
+                lookup,
+                reservation,
+                request_id=request_id,
+                principal=principal,
+                alias=req.model,
+                started=started,
+                stream=True,
+            )
+            return replay_as_stream(lookup.response), meta
         try:
             chunks, meta = await self.gateway.stream(req, opts)
         except GatewayError as exc:
@@ -295,3 +366,17 @@ class GatewayService:
             stream=False,
         )
         return resp, meta
+
+
+async def replay_as_stream(resp: ChatResponse) -> AsyncIterator[StreamChunk]:
+    """Serve a cached (non-streamed) response to a streaming client."""
+    if resp.content:
+        yield StreamChunk(content=resp.content)
+    if resp.tool_calls:
+        yield StreamChunk(
+            tool_calls=[
+                ToolCallDelta(index=i, id=tc.id, name=tc.name, arguments=tc.arguments)
+                for i, tc in enumerate(resp.tool_calls)
+            ]
+        )
+    yield StreamChunk(finish_reason=resp.finish_reason, usage=resp.usage)
