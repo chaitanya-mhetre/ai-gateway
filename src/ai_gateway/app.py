@@ -1,4 +1,4 @@
-"""FastAPI application: the HTTP surface. Business logic lives in `gateway.py`."""
+"""FastAPI application: the HTTP surface. The orchestration lives in `service.py` and `gateway.py`."""
 
 from __future__ import annotations
 
@@ -9,10 +9,23 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from redis.asyncio import Redis
 
+from ai_gateway import admin
+from ai_gateway.auth import ANONYMOUS, KeyAuthenticator, Principal
 from ai_gateway.config import GatewayConfig, Settings
+from ai_gateway.db import Database
 from ai_gateway.errors import GatewayError, InvalidRequestError
 from ai_gateway.gateway import CallMeta, Gateway, RequestOptions
+from ai_gateway.limits import (
+    BudgetStore,
+    Guard,
+    InMemoryBudgetStore,
+    InMemoryLimiter,
+    Limiter,
+    RedisBudgetStore,
+    RedisLimiter,
+)
 from ai_gateway.openai_compat import (
     ChunkEncoder,
     OpenAIChatRequest,
@@ -24,7 +37,10 @@ from ai_gateway.openai_compat import (
     to_internal,
 )
 from ai_gateway.providers.base import Provider
+from ai_gateway.redis_client import make_redis
 from ai_gateway.registry import build_providers
+from ai_gateway.routing.breaker import CircuitBreaker, InMemoryBreaker, RedisBreaker
+from ai_gateway.service import GatewayService
 
 _POLICIES = {"priority", "weighted", "cost", "latency"}
 _CACHE_MODES = {"bypass", "exact", "semantic"}
@@ -62,19 +78,56 @@ def create_app(
     *,
     config: GatewayConfig | None = None,
     providers: dict[str, Provider] | None = None,
+    redis: Redis | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     config = config or GatewayConfig.load(settings.config_path)
-    gateway = Gateway(config, providers if providers is not None else build_providers(config))
+    if redis is None and settings.redis_url:
+        redis = make_redis(settings.redis_url)
+
+    # Shared state lives in Redis when available (multi-replica safe), else in memory.
+    breaker: CircuitBreaker = (
+        RedisBreaker(redis, config.breaker) if redis else InMemoryBreaker(config.breaker)
+    )
+    limiter: Limiter = RedisLimiter(redis) if redis else InMemoryLimiter()
+    budgets: BudgetStore = RedisBudgetStore(redis) if redis else InMemoryBudgetStore()
+
+    gateway = Gateway(
+        config, providers if providers is not None else build_providers(config), breaker=breaker
+    )
+    db = Database(settings.database_url)
+    authenticator = KeyAuthenticator(db, settings.key_pepper, cache_ttl_s=settings.key_cache_ttl_s)
+    service = GatewayService(gateway, Guard(limiter, budgets))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await db.create_all()
         yield
         await gateway.aclose()
+        await db.dispose()
+        if redis is not None:
+            await redis.aclose()
 
     app = FastAPI(title="ai-gateway", version="0.1.0", lifespan=lifespan)
-    app.state.gateway = gateway
     app.state.settings = settings
+    app.state.gateway = gateway
+    app.state.db = db
+    app.state.authenticator = authenticator
+    app.state.service = service
+    app.include_router(admin.router)
+
+    async def principal_for(request: Request) -> Principal:
+        if not settings.auth_enabled:
+            return ANONYMOUS
+        return await authenticator.authenticate(request.headers.get("authorization"))
+
+    @app.middleware("http")
+    async def limit_body_size(request: Request, call_next: Any) -> Any:
+        length = request.headers.get("content-length")
+        if length is not None and length.isdigit() and int(length) > settings.max_body_bytes:
+            err = InvalidRequestError(f"request body exceeds {settings.max_body_bytes} bytes")
+            return JSONResponse(err.to_openai(), status_code=413)
+        return await call_next(request)
 
     @app.exception_handler(GatewayError)
     async def _gateway_error(_: Request, exc: GatewayError) -> JSONResponse:
@@ -93,10 +146,11 @@ def create_app(
         body: OpenAIChatRequest, request: Request
     ) -> JSONResponse | StreamingResponse:
         request_id = new_request_id()
+        principal = await principal_for(request)
         opts = parse_options(request)
         req = to_internal(body, max_tokens_cap=settings.max_tokens_cap)
         if req.stream:
-            chunks, meta = await gateway.stream(req, opts)
+            chunks, meta = await service.stream(principal, req, opts)
             encoder = ChunkEncoder(request_id, meta.model or req.model)
 
             async def sse() -> AsyncIterator[str]:
@@ -112,7 +166,7 @@ def create_app(
             return StreamingResponse(
                 sse(), media_type="text/event-stream", headers=_meta_headers(meta, request_id)
             )
-        resp, meta = await gateway.chat(req, opts)
+        resp, meta = await service.chat(principal, req, opts)
         return JSONResponse(
             response_to_openai(resp, request_id), headers=_meta_headers(meta, request_id)
         )
@@ -120,13 +174,24 @@ def create_app(
     @app.post("/v1/embeddings")
     async def embeddings(body: OpenAIEmbeddingRequest, request: Request) -> JSONResponse:
         request_id = new_request_id()
-        resp, meta = await gateway.embed(embedding_to_internal(body), parse_options(request))
+        principal = await principal_for(request)
+        resp, meta = await service.embed(
+            principal, embedding_to_internal(body), parse_options(request)
+        )
         return JSONResponse(embeddings_to_openai(resp), headers=_meta_headers(meta, request_id))
 
     @app.get("/v1/models")
-    async def list_models() -> dict[str, Any]:
-        data = [{"id": alias, "object": "model", "owned_by": "gateway"} for alias in config.aliases]
-        return {"object": "list", "data": data}
+    async def list_models(request: Request) -> dict[str, Any]:
+        principal = await principal_for(request)
+        visible = [
+            a
+            for a in config.aliases
+            if principal.allowed_aliases is None or a in principal.allowed_aliases
+        ]
+        return {
+            "object": "list",
+            "data": [{"id": a, "object": "model", "owned_by": "gateway"} for a in visible],
+        }
 
     @app.get("/health")
     async def health() -> dict[str, str]:

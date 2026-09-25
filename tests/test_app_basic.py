@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import httpx
 import openai
 import pytest
@@ -7,7 +9,7 @@ import pytest
 from ai_gateway.app import create_app
 from ai_gateway.config import Settings
 from ai_gateway.providers.base import Provider
-from tests.conftest import make_config
+from tests.conftest import app_client, make_config
 
 
 async def test_chat_completion_via_alias(client: httpx.AsyncClient) -> None:
@@ -61,12 +63,16 @@ async def test_embeddings_endpoint(client: httpx.AsyncClient) -> None:
 
 
 @pytest.fixture
-def sdk(settings: Settings, providers: dict[str, Provider]) -> openai.AsyncOpenAI:
+async def sdk(
+    settings: Settings, providers: dict[str, Provider]
+) -> AsyncIterator[openai.AsyncOpenAI]:
     app = create_app(settings, config=make_config(), providers=providers)
+    await app.state.db.create_all()
     http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
     # The SDK types its client against its vendored httpx fork; the stdlib httpx client is
     # runtime-compatible (duck-typed), which is all this in-process test needs.
-    return openai.AsyncOpenAI(base_url="http://gw/v1", api_key="unused", http_client=http_client)  # type: ignore[arg-type]
+    yield openai.AsyncOpenAI(base_url="http://gw/v1", api_key="unused", http_client=http_client)  # type: ignore[arg-type]
+    await http_client.aclose()
 
 
 async def test_official_openai_sdk_non_streaming(sdk: openai.AsyncOpenAI) -> None:
@@ -111,7 +117,7 @@ async def test_fallback_visible_in_headers(settings: Settings) -> None:
         "local": MockProvider("local"),
     }
     app = create_app(settings, config=make_config(), providers=providers)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+    async with app_client(app) as c:
         r = await c.post(
             "/v1/chat/completions",
             json={"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]},
@@ -130,7 +136,7 @@ async def test_mid_stream_failure_becomes_in_band_error_event(settings: Settings
         "local": MockProvider("local"),
     }
     app = create_app(settings, config=make_config(), providers=providers)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+    async with app_client(app) as c:
         r = await c.post(
             "/v1/chat/completions",
             json={
@@ -155,7 +161,7 @@ async def test_all_targets_failing_returns_502(settings: Settings) -> None:
         "local": MockProvider("local"),
     }
     app = create_app(settings, config=make_config(), providers=providers)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+    async with app_client(app) as c:
         r = await c.post(
             "/v1/chat/completions",
             json={"model": "chat-default", "messages": [{"role": "user", "content": "hi"}]},
