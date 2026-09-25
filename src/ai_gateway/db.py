@@ -126,6 +126,20 @@ class UsageDaily(Base):
     errors: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class AdminUser(Base):
+    """A control-plane operator. Authenticates with a personal token, hashed like API keys."""
+
+    __tablename__ = "admin_users"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(320), unique=True)
+    role: Mapped[str] = mapped_column(String(16))  # owner | operator | viewer (see admin_users.py)
+    token_prefix: Mapped[str] = mapped_column(String(16), unique=True)
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary(32))  # HMAC-SHA256(pepper, token)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         kwargs: dict[str, Any] = {}
@@ -201,6 +215,7 @@ def month_bucket(now: datetime | None = None) -> str:
 
 
 __all__ = [
+    "AdminUser",
     "ApiKey",
     "Base",
     "Database",
