@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Create a tenant, project and API key through the admin API, then call the gateway.
-# Assumes `docker compose up -d` (gateway on :58080, admin token dev-admin-token).
+# Assumes `docker compose up -d` (gateway on :58080). Creates an owner admin on first run, or
+# reuses $GATEWAY_ADMIN if you already have an admin token.
 set -euo pipefail
 GW=${GW:-http://localhost:58080}
-ADMIN="Authorization: Bearer ${GATEWAY_ADMIN_TOKEN:-dev-admin-token}"
+if [ -z "${GATEWAY_ADMIN:-}" ]; then
+  GATEWAY_ADMIN=$(docker compose run --rm -T gateway ai-gateway create-admin --email "demo-$RANDOM@example.com" --role owner 2>/dev/null | tail -1)
+  echo "Admin token (shown once; export GATEWAY_ADMIN to reuse): $GATEWAY_ADMIN"
+fi
+ADMIN="Authorization: Bearer $GATEWAY_ADMIN"
 json() { python3 -c "import sys,json;print(json.load(sys.stdin)[\"$1\"])"; }
 
 TENANT=$(curl -s -XPOST "$GW/admin/v1/tenants" -H "$ADMIN" -H 'content-type: application/json' -d '{"name":"demo-'$RANDOM'"}' | json id)

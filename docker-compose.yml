@@ -16,7 +16,6 @@ services:
       GATEWAY_CONFIG_PATH: /app/config/gateway.yaml
       GATEWAY_REDIS_URL: redis://redis:6379/0
       GATEWAY_DATABASE_URL: postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
-      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-dev-admin-token}
       GATEWAY_KEY_PEPPER: ${GATEWAY_KEY_PEPPER:-dev-pepper}
       GATEWAY_OTEL_ENABLED: "false"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

@@ -20,6 +20,7 @@ import platform
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -100,6 +101,19 @@ async def run_load(
     }
 
 
+def create_admin(gw_env: dict[str, str]) -> str:
+    """Create an owner admin in the bench DB via the CLI (it also runs migrations); return its token."""
+    out = subprocess.run(
+        [sys.executable, "-m", "ai_gateway.cli", "create-admin", "--email", "bench@example.com"],
+        cwd=ROOT,
+        env=gw_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip().splitlines()[-1]
+
+
 async def create_key(base: str, admin_token: str) -> str:
     h = {"Authorization": f"Bearer {admin_token}"}
     async with httpx.AsyncClient(base_url=base) as c:
@@ -135,16 +149,19 @@ async def main() -> None:
     args = ap.parse_args()
 
     env = {**os.environ, "MOCK_LATENCY_MS": str(args.latency_ms)}
+    db_file = Path(tempfile.mkdtemp(prefix="gw-bench-")) / "gateway.db"
     gw_env = {
         **os.environ,
         "GATEWAY_CONFIG_PATH": str(ROOT / "bench" / "gateway.bench.yaml"),
-        "GATEWAY_DATABASE_URL": "sqlite+aiosqlite:///:memory:",
-        "GATEWAY_ADMIN_TOKEN": "bench-admin",
+        # A file (not :memory:) so the admin created below is visible to the gateway process.
+        "GATEWAY_DATABASE_URL": f"sqlite+aiosqlite:///{db_file}",
         "GATEWAY_AUTH_ENABLED": "true" if args.mode == "redis" else "false",
         "GATEWAY_REDIS_URL": "redis://localhost:56382/1" if args.mode == "redis" else "",
     }
+    gw_env.pop("GATEWAY_ADMIN_TOKEN", None)
     if args.mode == "memory":
         gw_env.pop("GATEWAY_REDIS_URL")
+    admin_token = create_admin(gw_env)
     uv = [sys.executable, "-m", "uvicorn", "--log-level", "warning", "--no-access-log"]
     procs = [
         subprocess.Popen(
@@ -162,7 +179,7 @@ async def main() -> None:
         headers: dict[str, str] = {}
         if args.mode == "redis":
             headers["Authorization"] = (
-                f"Bearer {await create_key(f'http://127.0.0.1:{GATEWAY}', 'bench-admin')}"
+                f"Bearer {await create_key(f'http://127.0.0.1:{GATEWAY}', admin_token)}"
             )
         direct = await run_load(
             f"http://127.0.0.1:{UPSTREAM}/v1/chat/completions",
