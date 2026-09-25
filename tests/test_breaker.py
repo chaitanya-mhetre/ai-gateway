@@ -7,6 +7,7 @@ import pytest
 from redis.asyncio import Redis
 
 from ai_gateway.config import BreakerConfig
+from ai_gateway.redis_client import make_redis
 from ai_gateway.routing.breaker import BreakerState, CircuitBreaker, InMemoryBreaker, RedisBreaker
 
 CFG = BreakerConfig(window_s=10, min_requests=4, failure_ratio=0.5, cooldown_s=5)
@@ -73,7 +74,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:56382/0")
 
 @pytest.fixture
 async def redis() -> AsyncIterator[Redis]:
-    client: Redis = Redis.from_url(REDIS_URL)
+    client: Redis = make_redis(REDIS_URL)
     try:
         await client.ping()
     except Exception:
