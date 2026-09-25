@@ -1,0 +1,52 @@
+# A realistic multi-provider setup. Model names are placeholders: use current names from each
+# provider's docs. Credentials come from the env vars named in api_key_env (never put keys here).
+providers:
+  gemini:
+    type: gemini
+    api_key_env: GEMINI_API_KEY
+    timeout_ms: 30000
+  openai:
+    type: openai
+    api_key_env: OPENAI_API_KEY
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+  ollama:
+    type: ollama
+    base_url: http://localhost:51434   # docker compose --profile local-models
+
+price_table_path: prices.yaml
+
+breaker: {window_s: 30, min_requests: 10, failure_ratio: 0.5, cooldown_s: 15}
+cache: {exact_enabled: true, exact_ttl_s: 3600, semantic_enabled: false, semantic_threshold: 0.95}
+
+aliases:
+  chat-default:
+    policy: priority
+    targets:
+      - {provider: gemini,    model: "<gemini-flash-model>", priority: 1}
+      - {provider: openai,    model: "<openai-small-model>", priority: 2}
+      - {provider: ollama,    model: "<local-model>",        priority: 3, supports_tools: false}
+    fallback_on: [timeout, http_5xx, http_429, connection, circuit_open, context_length, provider_auth]
+    retry: {max_attempts_per_target: 2, backoff_ms: [200, 800], jitter: true}
+    deadline_ms: 30000
+    first_token_timeout_ms: 8000
+
+  chat-cheap:
+    policy: cost
+    requirements: {min_context: 16000}
+    targets:
+      - {provider: openai,    model: "<openai-small-model>"}
+      - {provider: gemini,    model: "<gemini-flash-model>"}
+
+  chat-premium:
+    policy: latency
+    targets:
+      - {provider: anthropic, model: "<claude-model>"}
+      - {provider: openai,    model: "<openai-large-model>"}
+
+  embed-default:
+    embedding: true
+    targets:
+      - {provider: openai,    model: "<openai-embedding-model>"}
+      - {provider: ollama,    model: "<local-embedding-model>"}

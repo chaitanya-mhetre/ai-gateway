@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["56382:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type-check
+        run: uv run mypy
+      - name: Tests (incl. Redis Lua scripts)
+        env:
+          REDIS_URL: redis://localhost:56382/0
+        run: uv run pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t ai-gateway:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --name gw -p 8080:8080 -e GATEWAY_DATABASE_URL=sqlite+aiosqlite:///:memory: -e GATEWAY_AUTH_ENABLED=false ai-gateway:ci
+          for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
+          curl -sf localhost:8080/v1/chat/completions -H 'content-type: application/json' \
+            -d '{"model":"chat-default","messages":[{"role":"user","content":"hi"}]}'
