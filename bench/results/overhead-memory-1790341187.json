@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-09-25T12:59:47+00:00",
+  "mode": "memory",
+  "concurrency": 10,
+  "upstream_latency_ms": 200,
+  "environment": {
+    "cpu": "12th Gen Intel(R) Core(TM) i5-1240P",
+    "cores": 16,
+    "os": "Linux-7.0.0-31-generic-x86_64-with-glibc2.43",
+    "python": "3.12.14"
+  },
+  "direct": {
+    "requests": 2000,
+    "errors": 0,
+    "wall_s": 40.637,
+    "rps": 49.2,
+    "p50_ms": 202.33,
+    "p95_ms": 205.52,
+    "p99_ms": 207.32,
+    "mean_ms": 202.7
+  },
+  "via_gateway": {
+    "requests": 2000,
+    "errors": 0,
+    "wall_s": 41.935,
+    "rps": 47.7,
+    "p50_ms": 208.32,
+    "p95_ms": 215.57,
+    "p99_ms": 220.53,
+    "mean_ms": 208.86
+  },
+  "overhead_ms": {
+    "p50_ms": 5.99,
+    "p95_ms": 10.05,
+    "p99_ms": 13.21,
+    "mean_ms": 6.16
+  }
+}

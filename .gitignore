@@ -7,4 +7,3 @@ __pycache__/
 .env
 dist/
 *.db
-bench/results/*.json

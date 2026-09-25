@@ -1,0 +1,10 @@
+# Gateway config for bench/overhead.py: one OpenAI-type provider pointing at bench/mock_upstream.py
+providers:
+  upstream:
+    type: openai
+    base_url: http://127.0.0.1:59101/v1
+aliases:
+  chat-default:
+    targets:
+      - {provider: upstream, model: mock-model}
+    retry: {max_attempts_per_target: 1}

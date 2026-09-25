@@ -52,6 +52,10 @@ select = ["E", "F", "I", "B", "UP", "SIM", "N", "ASYNC", "RUF"]
 # as `timeout` on purpose, because it must also configure httpx's per-operation timeouts.
 ignore = ["RUF012", "E501", "ASYNC109"]
 
+[tool.ruff.lint.per-file-ignores]
+# The benchmark harness starts/stops server processes once; blocking Popen there is intended.
+"bench/*" = ["ASYNC220", "ASYNC221"]
+
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
