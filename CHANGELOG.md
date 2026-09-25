@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Alembic migrations (`src/ai_gateway/migrations/`), packaged in the wheel so they run from the Docker
+  image. `ai-gateway migrate [revision]` applies them; the app runs `upgrade head` on startup only
+  when `GATEWAY_AUTO_MIGRATE=true` (the default, for dev/tests).
+- `docker compose` runs a one-shot `migrate` service before the gateway and usage worker start.
+- `tests/test_migrations.py`: upgrade from empty, downgrade to base, idempotency, data survives
+  step-by-step upgrades, and a model-vs-migration drift check. Runs on SQLite and, in CI, on Postgres.
+
+### Removed
+- `Database.create_all()`: the schema is no longer created from the ORM models at startup.
+
 ## [0.1.0] - 2026-09-25
 Built milestone by milestone (git tags `m1`…`m7`).
 

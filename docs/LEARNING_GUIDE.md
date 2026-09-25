@@ -48,7 +48,8 @@ Three ideas carry the whole design:
 | 19 | `src/ai_gateway/observability/*` | Metric types, label cardinality, spans. |
 | 20 | `src/ai_gateway/service.py` | Orchestration: admit → cache → gateway → cost → settle → record. |
 | 21 | `src/ai_gateway/app.py`, `admin.py` | HTTP surface, dependency wiring (Redis vs in-memory), lifespan. |
-| 22 | `tests/test_executor.py` | Read the tests as a *specification* of the reliability rules. |
+| 22 | `src/ai_gateway/db.py`, `migrations/` | ORM models; `Database.migrate()`; the Alembic scripts that actually own the schema. |
+| 23 | `tests/test_executor.py` | Read the tests as a *specification* of the reliability rules. |
 
 **Exercise after each file:** close it and explain out loud what it does and why it exists.
 
@@ -145,6 +146,23 @@ One trace per request, a child span per attempt. With no SDK configured, the OTe
 (near-zero cost). Prompt content is never recorded.
 
 ---
+
+### 3.14 Schema migrations (Alembic)
+`src/ai_gateway/migrations/`: `env.py` + `versions/0001_initial_schema.py`, driven by `Database.migrate()`
+in `db.py` and `ai-gateway migrate` in `cli.py`.
+- **Why not `create_all`?** It only creates missing tables. It never adds a column, changes a type or
+  drops anything, so the second schema change in production silently doesn't happen. Migrations are
+  ordered, versioned scripts, and the `alembic_version` table records which one the database is at.
+- **Autogenerate is a draft, not the answer.** `alembic revision --autogenerate` diffs the models
+  against the database, but it can't see renames (it emits drop + add, i.e. data loss). Always read
+  and edit the generated script.
+- **The drift test.** `test_models_match_migrations` runs every migration and then asks Alembic to
+  diff the result against the ORM models. Any difference means someone changed one without the other.
+- **Release step, not startup.** With several replicas, running migrations in each app's startup
+  races. Compose runs a one-shot `migrate` service first and the app starts with
+  `GATEWAY_AUTO_MIGRATE=false`.
+- **SQLite quirks.** SQLite can't `ALTER` most things in place; `render_as_batch=True` makes Alembic
+  copy the table instead, so the same scripts work in tests and on Postgres.
 
 ## 4. Things to try (hands-on)
 
@@ -272,8 +290,21 @@ Partition `usage_events` by month, keep daily rollups for dashboards, and move r
 column store (ClickHouse) with the same event schema.
 
 **Q25. What would you do next?**
-Alembic migrations, the outage benchmark (breaker on vs off), multi-worker numbers, guardrail
-hooks, a pgvector-backed semantic cache, and a shared usage schema with the aiwatch SDK.
+Multi-worker numbers, guardrail hooks, a pgvector-backed semantic cache, monthly partitions for
+usage events, and a shared usage schema with the aiwatch SDK.
+
+**Q26. Why run migrations as a separate step instead of on app startup?**
+With N replicas starting at once, each would try to run the same DDL; at best they serialise on locks,
+at worst one fails half-way. A single release step also makes a failed migration stop the deploy
+before any new code serves traffic. Startup migration is kept only as a dev convenience.
+
+**Q27. How do you change a column without downtime?**
+Expand/contract: add the new column (nullable), deploy code that writes both, backfill in batches,
+switch reads, then drop the old column in a later migration. Never rename-in-place on a hot table.
+
+**Q28. How do you know the ORM models and the migrations agree?**
+A test runs all migrations on an empty database and asks Alembic's `compare_metadata` for the diff
+against the models; it must be empty (`tests/test_migrations.py`). CI runs it on Postgres too.
 
 ---
 

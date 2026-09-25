@@ -191,7 +191,7 @@ cache hit rates, cost accuracy against provider dashboards.
 
 ## Limitations
 
-- No Alembic migrations yet (tables come from `create_all`); no Postgres partitioning of `usage_events`.
+- No Postgres partitioning of `usage_events` yet (the schema is managed by Alembic; see `ai_gateway/migrations/`).
 - The admin API uses a static bearer token, not SSO/RBAC; price and route edits are config files, not DB-backed.
 - The semantic cache is an in-memory brute-force index (per replica). Production would use pgvector or Redis vector search.
 - Text-only messages (no images/audio). Anthropic-native `/v1/messages` isn't exposed.
@@ -200,7 +200,7 @@ cache hit rates, cost accuracy against provider dashboards.
 
 ## Roadmap
 
-- Alembic migrations; monthly partitions for `usage_events`
+- Monthly partitions for `usage_events` (as an Alembic migration)
 - Outage/breaker benchmark and multi-worker throughput numbers
 - Guardrail plugin hooks (pre/post), prompt/response logging with redaction and retention (opt-in)
 - pgvector semantic cache; share the usage-event schema and price table with `oss/aiwatch`
