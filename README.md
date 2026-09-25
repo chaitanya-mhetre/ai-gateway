@@ -6,7 +6,8 @@ caching, API keys, rate limits, budgets, and token/cost/latency metering.
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:58080/v1", api_key="gk_...")   # the only change
+
+client = OpenAI(base_url="http://localhost:58080/v1", api_key="gk_...")  # the only change
 client.chat.completions.create(model="chat-default", messages=[{"role": "user", "content": "hi"}])
 ```
 
