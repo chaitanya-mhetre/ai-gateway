@@ -181,6 +181,19 @@ in `db.py` and `ai-gateway migrate` in `cli.py`.
   every replica, and admin traffic is too low for the extra DB lookup to matter.
 - **Lockout protection.** The last active owner can't be disabled (409).
 
+### 3.16 Outage testing: finding a bug a unit test didn't
+`bench/outage.py` kills or hangs the primary mock under load and records every request.
+- **Kill vs hang are different failures.** A dead process refuses connections instantly; a hung one
+  accepts and never answers, so the only defence is a timeout. Most real outages look like hangs.
+- **The bug it found:** `timeout_ms` existed in the config but nothing read it. The per-request
+  deadline (5 s) was the only limit, so a hung primary ate the whole budget and the healthy secondary
+  never got a turn. Unit tests passed because they never combined "hang" with "deadline longer than
+  the provider should get". The fix is `Executor._attempt_budget`.
+- **Timeout layering:** request deadline (whole call) ≥ per-attempt timeout (one provider) ≥ connect
+  timeout. The attempt timeout must leave room for fallback inside the deadline.
+- **Why the breaker trips late:** ratio over a rolling window that still contains pre-outage
+  successes. Trade-off: faster trip = more false opens on a brief blip.
+
 ## 4. Things to try (hands-on)
 
 1. `make up && make run`, then `./examples/quickstart.sh` against `:8080`.
@@ -336,6 +349,21 @@ route's dependency tree and fails if the permission dependency is missing. Defau
 **Q31. Why check permissions instead of roles in the routes?**
 Roles change (new roles, split roles); permissions describe actions and stay stable. With
 role → permission as data, a new role is one dict entry and no route changes.
+
+**Q33. Your fallback works in unit tests. How do you know it works in an outage?**
+Inject the failure under load and look at per-request data: kill the primary, hang it, make it
+return 503, with the breaker on and off. That's how this project found that a hung provider consumed
+the whole deadline (100% errors) despite green unit tests.
+
+**Q34. How should request deadline, per-attempt timeout and retries relate?**
+Deadline bounds the whole call; each attempt gets min(provider timeout, remaining deadline); retries
+and fallback only happen while budget remains. Set the attempt timeout well below the deadline or
+fallback can never run.
+
+**Q35. Why did the circuit take ~10 s to open, and would you change it?**
+The failure ratio is over a 10 s window still full of pre-outage successes, and hung calls are only
+counted after their timeout. Options: a shorter window, a consecutive-failures trigger, or counting
+timeouts as they start. Each speeds tripping and raises the false-open rate.
 
 **Q32. Next step beyond personal tokens?**
 SSO/OIDC for humans (short-lived JWTs from the company IdP, roles mapped from IdP groups), keep

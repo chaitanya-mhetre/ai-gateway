@@ -18,6 +18,13 @@
   permission matrix and fails if a route is added without a permission.
 - Mutating admin calls are logged to `ai_gateway.admin.audit` (admin id, email, role, permission, route).
 
+- `bench/outage.py`: provider-outage benchmark (kill / hang / 5xx, breaker on vs off) with per-request
+  samples, plus `bench/summarise_outage.py`. Results in `docs/benchmarks.md`.
+
+### Fixed
+- `ProviderConfig.timeout_ms` is now enforced per non-streaming attempt (capped by the remaining
+  deadline). Before, a hung provider consumed the whole request deadline and fallback never ran.
+
 ### Removed
 - `Database.create_all()`: the schema is no longer created from the ORM models at startup.
 - `GATEWAY_ADMIN_TOKEN` (the single shared admin secret). If it's still set, the app logs a warning and

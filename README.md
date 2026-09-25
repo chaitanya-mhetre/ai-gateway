@@ -188,7 +188,13 @@ Local laptop, single uvicorn worker, mock upstream with a fixed 200 ms latency. 
 | Redis + auth + limits | 10 | 12.8 / 18.8 ms | 46.1 |
 | Redis + auth + limits | 50 | 17.5 / 63.7 ms | 215.4 (CPU-bound single process) |
 
-Not yet measured (TBD): multi-worker throughput, availability during a simulated provider outage,
+**Provider outage** (`bench/outage.py`, primary killed / hung / returning 503 for 30 s under load,
+secondary healthy): after fixing a bug this benchmark found (provider `timeout_ms` wasn't enforced, so a
+hung provider made **100%** of requests fail with the breaker off), **0 failed requests** in every
+scenario. With the breaker on, a hung primary cost ~1.2 s only for the 83 requests before the circuit
+opened (9.7 s in); then p50 returned to ~206 ms. Details in [docs/benchmarks.md](docs/benchmarks.md#provider-outage-2026-09-25).
+
+Not yet measured (TBD): multi-worker throughput, outage behaviour with the Redis breaker across replicas,
 cache hit rates, cost accuracy against provider dashboards.
 
 ## Engineering trade-offs
@@ -222,7 +228,7 @@ cache hit rates, cost accuracy against provider dashboards.
 ## Roadmap
 
 - Monthly partitions for `usage_events` (as an Alembic migration)
-- Outage/breaker benchmark and multi-worker throughput numbers
+- Multi-worker throughput numbers; faster breaker trip (consecutive-failure trigger)
 - Guardrail plugin hooks (pre/post), prompt/response logging with redaction and retention (opt-in)
 - pgvector semantic cache; share the usage-event schema and price table with `oss/aiwatch`
 
